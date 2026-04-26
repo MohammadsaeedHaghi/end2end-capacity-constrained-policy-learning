@@ -1,0 +1,229 @@
+"""
+S2: sample-based dual-price method.
+
+Fit per-treatment outcome models m_hat_t(x), then solve the sample-based
+dual LP for shadow prices mu_hat, then deploy a deterministic policy
+    a(x) = argmax_t [m_hat_t(x) - mu_hat_t]
+on the eval split.
+"""
+
+import time
+import warnings
+
+import numpy as np
+import cvxpy as cp
+
+from sklearn.linear_model import LinearRegression, LassoCV
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
+from .evaluation import evaluate_policy
+
+
+def fit_outcome_models(X_train, T_train, Y_train, T, method, E_train=None):
+    """
+    Fit per-treatment conditional mean outcome models.
+
+    Methods:
+        linear : OLS per treatment
+        lasso  : LassoCV per treatment
+        tree   : DecisionTreeRegressor per treatment
+        knn    : KNeighborsRegressor per treatment
+        dr     : doubly-robust pseudo-outcome + Lasso smoothing
+    """
+    method = method.lower()
+    models = []
+
+    if method == "dr":
+        if E_train is None:
+            raise ValueError("DR method requires E_train, the full propensity matrix.")
+
+        first_stage = []
+
+        for t in range(T):
+            mask = T_train == t
+
+            if mask.sum() < 2:
+                warnings.warn(
+                    f"[DR] treatment {t} has <2 samples; using zero first-stage model."
+                )
+                first_stage.append(None)
+                continue
+
+            pipe = Pipeline([
+                ("scaler", StandardScaler()),
+                ("lasso", LassoCV(cv=min(5, mask.sum()), max_iter=5000)),
+            ])
+            pipe.fit(X_train[mask], Y_train[mask])
+            first_stage.append(pipe)
+
+        N_train = X_train.shape[0]
+        phi = np.zeros((N_train, T))
+        E_clip = np.clip(E_train, 1e-6, None)
+
+        for t in range(T):
+            if first_stage[t] is None:
+                m_hat = np.zeros(N_train)
+            else:
+                m_hat = first_stage[t].predict(X_train)
+
+            indicator = (T_train == t).astype(float)
+            residual = Y_train - m_hat
+            phi[:, t] = m_hat + indicator / E_clip[:, t] * residual
+
+        for t in range(T):
+            pipe = Pipeline([
+                ("scaler", StandardScaler()),
+                ("lasso", LassoCV(cv=5, max_iter=5000)),
+            ])
+            pipe.fit(X_train, phi[:, t])
+            models.append(pipe)
+
+        return models
+
+    for t in range(T):
+        mask = T_train == t
+
+        if mask.sum() < 2:
+            warnings.warn(
+                f"[{method}] treatment {t} has <2 samples; using zero predictor."
+            )
+            models.append(None)
+            continue
+
+        Xt = X_train[mask]
+        Yt = Y_train[mask]
+
+        if method == "linear":
+            reg = LinearRegression()
+        elif method == "lasso":
+            reg = Pipeline([
+                ("scaler", StandardScaler()),
+                ("lasso", LassoCV(cv=min(5, mask.sum()), max_iter=5000)),
+            ])
+        elif method == "tree":
+            reg = DecisionTreeRegressor(max_depth=5, min_samples_leaf=5, random_state=0)
+        elif method == "knn":
+            k = min(10, max(1, mask.sum() - 1))
+            reg = KNeighborsRegressor(n_neighbors=k)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        reg.fit(Xt, Yt)
+        models.append(reg)
+
+    return models
+
+
+def get_mhat_matrix(models, X, T):
+    """M_hat[i, t] = m_hat_t(X_i)."""
+    N_eval = X.shape[0]
+    M_hat = np.zeros((N_eval, T))
+
+    for t in range(T):
+        if models[t] is None:
+            M_hat[:, t] = 0.0
+        else:
+            M_hat[:, t] = models[t].predict(X)
+
+    return M_hat
+
+
+def solve_dual_lp(M_hat, b, verbose=False):
+    """
+    Sample-based dual LP:
+
+        min_{mu >= 0, z}  (1/N) sum_i z_i + b^T mu
+        s.t.              z_i >= M_hat[i, t] - mu_t   for all i, t
+    """
+    N_local, T_local = M_hat.shape
+    assert len(b) == T_local, (
+        f"b has length {len(b)}, but M_hat has {T_local} treatments."
+    )
+
+    mu = cp.Variable(T_local, nonneg=True)
+    z = cp.Variable(N_local)
+
+    constraints = [z >= M_hat[:, t] - mu[t] for t in range(T_local)]
+
+    objective = cp.Minimize((1.0 / N_local) * cp.sum(z) + np.asarray(b) @ mu)
+    problem = cp.Problem(objective, constraints)
+
+    t0 = time.time()
+    try:
+        problem.solve(verbose=verbose)
+    except Exception as e:
+        warnings.warn(f"Default solver failed with error: {e}. Retrying with SCS.")
+        problem.solve(solver=cp.SCS, verbose=verbose)
+    solve_time = time.time() - t0
+
+    if mu.value is None:
+        raise RuntimeError(f"LP did not return a solution. Status: {problem.status}")
+
+    mu_hat = np.asarray(mu.value).reshape(-1)
+    z_hat = np.asarray(z.value).reshape(-1)
+
+    return mu_hat, z_hat, problem.status, solve_time
+
+
+def recover_policy(M_hat, mu_hat):
+    """Deterministic policy a(x) = argmax_t [M_hat[i, t] - mu_hat_t]."""
+    adjusted = M_hat - mu_hat[None, :]
+    assignments = adjusted.argmax(axis=1)
+
+    N_local, T_local = M_hat.shape
+    pi_onehot = np.zeros_like(M_hat)
+    pi_onehot[np.arange(N_local), assignments] = 1.0
+
+    return assignments, pi_onehot
+
+
+def run_dual_method(method_name, train_data, eval_data, T, b, verbose_lp=False):
+    """End-to-end S2 pipeline for one outcome-estimation method."""
+    method_name = method_name.lower()
+    tag = f"S2-{method_name}"
+
+    t0 = time.time()
+
+    models = fit_outcome_models(
+        X_train=train_data["X"],
+        T_train=train_data["T"],
+        Y_train=train_data["Y"],
+        T=T,
+        method=method_name,
+        E_train=train_data["E"],
+    )
+
+    M_hat_train = get_mhat_matrix(models, train_data["X"], T)
+    mu_hat, z_hat, status, lp_time = solve_dual_lp(M_hat_train, b, verbose=verbose_lp)
+    M_hat_eval = get_mhat_matrix(models, eval_data["X"], T)
+    assignments, pi_onehot = recover_policy(M_hat_eval, mu_hat)
+
+    total_time = time.time() - t0
+
+    result = evaluate_policy(
+        pi_onehot=pi_onehot,
+        assignments=assignments,
+        eval_data=eval_data,
+        b=b,
+        tag=tag,
+    )
+    result.update({
+        "method": tag,
+        "mu": mu_hat,
+        "lp_status": status,
+        "lp_time": lp_time,
+        "total_time": total_time,
+    })
+
+    print(
+        f"       LP status={status}, "
+        f"LP time={lp_time:.3f}s, "
+        f"total time={total_time:.3f}s"
+    )
+    print(f"       mu={np.array2string(mu_hat, precision=3)}")
+    print(f"       alloc={np.array2string(result['alloc'], precision=3)}")
+
+    return result
