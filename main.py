@@ -6,7 +6,7 @@ from src.inner_G import initialize_G_layer
 from src.train import train_GF
 from src.evaluation import evaluate_GF_model, evaluate_greedy_no_cap_from_model
 from src.baselines import evaluate_random_policy, evaluate_oracle_greedy_no_cap
-from src.s2_dual import run_dual_method
+from src.s2_dual import run_dual_method, fit_outcome_models, get_mhat_matrix
 from src.comparison import make_comparison_table
 
 
@@ -35,11 +35,27 @@ def main():
 
     initialize_G_layer(N=N, T=T, tau=TAU, b=B)
 
+    # One LassoCV outcome model fit on train data, used as the m_hat for
+    # V_DR_eval across every method (same yardstick for all).
+    print("\n[main] Fitting LassoCV outcome models for DR evaluation...")
+    dr_outcome_models = fit_outcome_models(
+        X_train=train_data["X"],
+        T_train=train_data["T"],
+        Y_train=train_data["Y"],
+        T=T, method="lasso",
+    )
+    m_hat_eval = get_mhat_matrix(dr_outcome_models, eval_data["X"], T)
+    print(f"[main] m_hat_eval shape: {m_hat_eval.shape}")
+
     results = []
 
     print("\n========= BASELINES =========")
-    results.append(evaluate_random_policy(eval_data, b=B, T=T))
-    results.append(evaluate_oracle_greedy_no_cap(eval_data, b=B, T=T))
+    results.append(evaluate_random_policy(
+        train_data, eval_data, m_hat_eval, b=B, T=T,
+    ))
+    results.append(evaluate_oracle_greedy_no_cap(
+        train_data, eval_data, m_hat_eval, b=B, T=T,
+    ))
 
     print("\n========= TRAIN G (CVXPYLayer, convex dual) =========")
     model_G, mu_G, hist_G = train_GF(
@@ -49,11 +65,13 @@ def main():
         steps=200, lr=5e-3, log_every=20, seed=1,
     )
     results.append(evaluate_GF_model(
-        model=model_G, mu_train=mu_G, eval_data=eval_data,
+        model=model_G, mu_train=mu_G,
+        train_data=train_data, eval_data=eval_data, m_hat_eval=m_hat_eval,
         b=B, tau=TAU, T=T, tag="G",
     ))
     results.append(evaluate_greedy_no_cap_from_model(
-        model=model_G, eval_data=eval_data, b=B, T=T,
+        model=model_G, train_data=train_data, eval_data=eval_data,
+        m_hat_eval=m_hat_eval, b=B, T=T,
     ))
 
     print("\n========= TRAIN F (implicit diff, non-convex literal) =========")
@@ -64,7 +82,8 @@ def main():
         steps=200, lr=5e-3, log_every=20, seed=1,
     )
     results.append(evaluate_GF_model(
-        model=model_F, mu_train=mu_F, eval_data=eval_data,
+        model=model_F, mu_train=mu_F,
+        train_data=train_data, eval_data=eval_data, m_hat_eval=m_hat_eval,
         b=B, tau=TAU, T=T, tag="F",
     ))
 
@@ -75,6 +94,7 @@ def main():
             method_name=method,
             train_data=train_data,
             eval_data=eval_data,
+            m_hat_eval=m_hat_eval,
             T=T, b=B,
             verbose_lp=False,
         ))

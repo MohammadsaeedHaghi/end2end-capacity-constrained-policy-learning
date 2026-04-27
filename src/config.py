@@ -7,8 +7,8 @@ import torch
 SEED = 0
 
 # Sample sizes
-N = 200
-N_EVAL = 2000
+N = 400
+N_EVAL = 10_000
 
 # Problem dimensions
 TREATMENT = 4

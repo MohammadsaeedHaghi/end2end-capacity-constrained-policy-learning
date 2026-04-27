@@ -180,7 +180,8 @@ def recover_policy(M_hat, mu_hat):
     return assignments, pi_onehot
 
 
-def run_dual_method(method_name, train_data, eval_data, T, b, verbose_lp=False):
+def run_dual_method(method_name, train_data, eval_data, m_hat_eval,
+                    T, b, verbose_lp=False):
     """End-to-end S2 pipeline for one outcome-estimation method."""
     method_name = method_name.lower()
     tag = f"S2-{method_name}"
@@ -199,14 +200,20 @@ def run_dual_method(method_name, train_data, eval_data, T, b, verbose_lp=False):
     M_hat_train = get_mhat_matrix(models, train_data["X"], T)
     mu_hat, z_hat, status, lp_time = solve_dual_lp(M_hat_train, b, verbose=verbose_lp)
     M_hat_eval = get_mhat_matrix(models, eval_data["X"], T)
-    assignments, pi_onehot = recover_policy(M_hat_eval, mu_hat)
+
+    assignments_eval, pi_onehot_eval = recover_policy(M_hat_eval, mu_hat)
+    assignments_train, pi_onehot_train = recover_policy(M_hat_train, mu_hat)
 
     total_time = time.time() - t0
 
     result = evaluate_policy(
-        pi_onehot=pi_onehot,
-        assignments=assignments,
+        pi_onehot_eval=pi_onehot_eval,
+        assignments_eval=assignments_eval,
+        pi_onehot_train=pi_onehot_train,
+        assignments_train=assignments_train,
+        train_data=train_data,
         eval_data=eval_data,
+        m_hat_eval=m_hat_eval,
         b=b,
         tag=tag,
     )

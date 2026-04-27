@@ -12,7 +12,9 @@ def make_comparison_table(results, b, N, N_EVAL, T, D):
 
         row = {
             "Method": r["tag"],
-            "V_IPW": r["V_IPW"],
+            "V_IPW_train": r["V_IPW_train"],
+            "V_IPW_eval": r["V_IPW_eval"],
+            "V_DR_eval": r["V_DR_eval"],
             "V_oracle": r["V_oracle"],
             "CapViolation": r["cap_viol_sup"],
             "Cap_OK": r["cap_ok"],

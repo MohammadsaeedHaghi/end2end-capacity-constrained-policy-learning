@@ -7,3 +7,17 @@ __pycache__/
 .env
 .vscode/
 .idea/
+data/
+results/
+logs/
+*.npz
+*.csv
+*.pt
+*.pth
+*.pkl
+*.pt.gz
+*.pth.gz
+*.pkl.gz
+*.pt.tar
+*.pth.tar
+*.lock
