@@ -21,3 +21,4 @@ logs/
 *.pt.tar
 *.pth.tar
 *.lock
+*.png
