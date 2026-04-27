@@ -26,7 +26,7 @@ from experiments.run_cell import (
 )
 
 
-DEFAULT_NS = list(range(100, 1001, 100))
+DEFAULT_NS = list(range(10, 51, 10))
 DEFAULT_SEEDS = list(range(20))
 LOGS_DIR = "logs"
 
@@ -56,10 +56,11 @@ def _select_cells(Ns, seeds, force, retry_failed):
 
 def _worker(args):
     """multiprocessing-compatible adapter (no kwargs through Pool)."""
-    N, seed, steps, lr, force = args
+    N, seed, steps, lr, force, skip_mu = args
     t0 = time.time()
     try:
-        rows = run_one_cell(N=N, seed=seed, steps=steps, lr=lr, force=force)
+        rows = run_one_cell(N=N, seed=seed, steps=steps, lr=lr,
+                            force=force, skip_mu=skip_mu)
         wall = time.time() - t0
         status = "ok" if rows else "FAILED"
         return (N, seed, status, wall)
@@ -83,6 +84,8 @@ def _parse_args():
                    help="Re-run cells with a .FAILED marker.")
     p.add_argument("--no-aggregate", action="store_true",
                    help="Skip the post-sweep aggregate step.")
+    p.add_argument("--skip-mu", action="store_true",
+                   help="Skip the eval-time -mu refit variants for cheaper cells.")
     return p.parse_args()
 
 
@@ -106,7 +109,7 @@ def main():
             aggregate.main()
         return
 
-    work = [(N, s, args.steps, args.lr, args.force) for (N, s) in cells]
+    work = [(N, s, args.steps, args.lr, args.force, args.skip_mu) for (N, s) in cells]
 
     t_start = time.time()
     n_done = 0

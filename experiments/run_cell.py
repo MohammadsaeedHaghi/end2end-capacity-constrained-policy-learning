@@ -20,12 +20,17 @@ import torch
 
 from src import config
 from src.data import generate_data
-from src.inner_G import initialize_G_layer
-from src.inner_F import reset_F_state
+from src.inner_G import initialize_G_layer, solve_G_scipy
+from src.inner_F import reset_F_state, _solve_F_inner
 from src.train import train_GF
 from src.evaluation import evaluate_GF_model, evaluate_greedy_no_cap_from_model
 from src.baselines import evaluate_random_policy, evaluate_oracle_greedy_no_cap
-from src.s2_dual import run_dual_method, fit_outcome_models, get_mhat_matrix
+from src.s2_dual import (
+    run_dual_method,
+    run_dual_method_with_eval_mu,
+    fit_outcome_models,
+    get_mhat_matrix,
+)
 
 
 DATA_DIR = "data"
@@ -58,9 +63,10 @@ def _atomic_write_csv(df, final_path):
 
 
 def _atomic_savez(final_path, **kwargs):
-    """Atomic np.savez_compressed. Tmp path ends in .npz so numpy doesn't
-    auto-append the extension and lose track of the file."""
-    tmp = final_path + ".tmp.npz"
+    """Atomic np.savez_compressed. Per-PID tmp path so that concurrent workers
+    writing the same final_path don't race on the tmp file. Tmp path ends in
+    .npz so numpy doesn't auto-append the extension."""
+    tmp = f"{final_path}.{os.getpid()}.tmp.npz"
     np.savez_compressed(tmp, **kwargs)
     os.replace(tmp, final_path)
 
@@ -78,6 +84,7 @@ def _load_or_make_eval():
         sigma_y=config.SIGMA_Y,
         propensity_strength=config.PROPENSITY_STRENGTH,
         outcome_strength=config.OUTCOME_STRENGTH,
+        treatment_effect_strength=config.TREATMENT_EFFECT_STRENGTH,
         clip_propensity=config.CLIP_PROPENSITY,
     )
     _atomic_savez(SHARED_EVAL_PATH, **eval_data)
@@ -115,7 +122,7 @@ def _flatten_result(r, N, seed, T, wall_s):
     return row
 
 
-def _run_cell_body(N, seed, steps, lr):
+def _run_cell_body(N, seed, steps, lr, skip_mu=False):
     """Inner body of run_one_cell — assumes setup already done."""
     T = config.T
     D = config.D
@@ -133,6 +140,7 @@ def _run_cell_body(N, seed, steps, lr):
         sigma_y=config.SIGMA_Y,
         propensity_strength=config.PROPENSITY_STRENGTH,
         outcome_strength=config.OUTCOME_STRENGTH,
+        treatment_effect_strength=config.TREATMENT_EFFECT_STRENGTH,
         clip_propensity=config.CLIP_PROPENSITY,
     )
     train_path = _train_npz_path(N, seed)
@@ -160,50 +168,83 @@ def _run_cell_body(N, seed, steps, lr):
         train_data, eval_data, m_hat_eval, b=B, T=T,
     ))
 
-    # G.
-    model_G, mu_G, _ = train_GF(
+    b_t = torch.tensor(B)
+    X_eval_t = torch.tensor(eval_data["X"])
+
+    # G: vanilla (μ from train) + G-mu (μ re-solved on eval).
+    model_G, mu_G_train, _ = train_GF(
         kind="G", train_data=train_data,
         D=D, T=T, tau=TAU, b=B,
-        steps=steps, lr=lr, log_every=max(1, steps),  # silence step logs
+        steps=steps, lr=lr, log_every=max(1, steps),
         seed=seed,
     )
     results.append(evaluate_GF_model(
-        model=model_G, mu_train=mu_G,
+        model=model_G, mu_train=mu_G_train,
         train_data=train_data, eval_data=eval_data,
         m_hat_eval=m_hat_eval, b=B, tau=TAU, T=T, tag="G",
+        policy="argmax",
     ))
+    if not skip_mu:
+        with torch.no_grad():
+            M_eval_G = model_G(X_eval_t)
+        mu_G_eval = solve_G_scipy(M_eval_G, b_t, TAU)
+        results.append(evaluate_GF_model(
+            model=model_G, mu_train=mu_G_eval,
+            train_data=train_data, eval_data=eval_data,
+            m_hat_eval=m_hat_eval, b=B, tau=TAU, T=T, tag="G-mu",
+            policy="argmax",
+        ))
     results.append(evaluate_greedy_no_cap_from_model(
         model=model_G, train_data=train_data, eval_data=eval_data,
         m_hat_eval=m_hat_eval, b=B, T=T,
     ))
 
-    # F.
-    model_F, mu_F, _ = train_GF(
+    # F: vanilla + F-mu.
+    model_F, mu_F_train, _ = train_GF(
         kind="F", train_data=train_data,
         D=D, T=T, tau=TAU, b=B,
         steps=steps, lr=lr, log_every=max(1, steps),
         seed=seed,
     )
     results.append(evaluate_GF_model(
-        model=model_F, mu_train=mu_F,
+        model=model_F, mu_train=mu_F_train,
         train_data=train_data, eval_data=eval_data,
         m_hat_eval=m_hat_eval, b=B, tau=TAU, T=T, tag="F",
     ))
+    if not skip_mu:
+        with torch.no_grad():
+            M_eval_F = model_F(X_eval_t)
+        mu_F_eval, _ = _solve_F_inner(M_eval_F, b_t, TAU)
+        results.append(evaluate_GF_model(
+            model=model_F, mu_train=mu_F_eval,
+            train_data=train_data, eval_data=eval_data,
+            m_hat_eval=m_hat_eval, b=B, tau=TAU, T=T, tag="F-mu",
+        ))
 
     # S2 methods.
     for method in S2_METHODS:
-        results.append(run_dual_method(
+        if skip_mu:
+            results.append(run_dual_method(
+                method_name=method,
+                train_data=train_data,
+                eval_data=eval_data,
+                m_hat_eval=m_hat_eval,
+                T=T, b=B, verbose_lp=False,
+            ))
+            continue
+        pair = run_dual_method_with_eval_mu(
             method_name=method,
             train_data=train_data,
             eval_data=eval_data,
             m_hat_eval=m_hat_eval,
             T=T, b=B, verbose_lp=False,
-        ))
+        )
+        results.extend(pair)
 
     return results
 
 
-def run_one_cell(N, seed, steps=200, lr=5e-3, force=False):
+def run_one_cell(N, seed, steps=200, lr=5e-3, force=False, skip_mu=False):
     """Worker entry point. Returns list of row-dicts (also written to CSV)."""
     _ensure_dirs()
 
@@ -226,7 +267,7 @@ def run_one_cell(N, seed, steps=200, lr=5e-3, force=False):
 
     t0 = time.time()
     try:
-        results = _run_cell_body(N, seed, steps=steps, lr=lr)
+        results = _run_cell_body(N, seed, steps=steps, lr=lr, skip_mu=skip_mu)
     except Exception:
         with open(failed_path, "w") as f:
             f.write(traceback.format_exc())
@@ -246,13 +287,16 @@ def _parse_args():
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--skip-mu", action="store_true",
+                   help="Skip the eval-time -mu refit variants for cheaper cells.")
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
     rows = run_one_cell(N=args.N, seed=args.seed,
-                        steps=args.steps, lr=args.lr, force=args.force)
+                        steps=args.steps, lr=args.lr, force=args.force,
+                        skip_mu=args.skip_mu)
     if not rows:
         print(f"[run_cell] N={args.N} seed={args.seed}: cell FAILED, "
               f"see {_failed_path(args.N, args.seed)}", file=sys.stderr)

@@ -5,11 +5,13 @@ from torch import nn
 
 
 class MLPScore(nn.Module):
-    def __init__(self, d_in=30, hidden=16, T=15):
+    def __init__(self, d_in=30, hidden=64, T=15):
         super().__init__()
 
         self.trunk = nn.Sequential(
             nn.Linear(d_in, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),

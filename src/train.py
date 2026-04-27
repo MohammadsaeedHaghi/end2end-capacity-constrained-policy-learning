@@ -48,7 +48,7 @@ def train_GF(
     X_t, T_t, Y_t, e_T_t = prepare_torch_training_data(train_data)
     N_local = X_t.shape[0]
 
-    model = MLPScore(d_in=D, hidden=16, T=T)
+    model = MLPScore(d_in=D, hidden=64, T=T)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     mu_layer = make_mu_layer(kind, b, tau)

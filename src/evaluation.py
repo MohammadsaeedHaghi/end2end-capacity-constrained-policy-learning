@@ -13,20 +13,37 @@ from .policy import (
 
 
 def evaluate_GF_model(model, mu_train, train_data, eval_data, m_hat_eval,
-                      b, tau, T, tag):
+                      b, tau, T, tag, policy="softmax"):
     """
     Apply the trained policy (theta, mu_train) to both splits.
     mu_train is frozen — it is part of the policy, not re-solved on eval.
+
+    `policy` selects the deployment rule:
+      - "softmax": pi(t|x) = softmax_t((M[t,x] - mu_t) / tau)   — F's natural form
+      - "argmax":  pi(t|x) = onehot(argmax_t (M[t,x] - mu_t))   — G's LP-consistent form
     """
     if not torch.is_tensor(mu_train):
         mu_train = torch.tensor(mu_train)
+    mu_np = mu_train.detach().cpu().numpy()
 
     with torch.no_grad():
         X_e = torch.tensor(eval_data["X"])
-        pi_e = softmax_policy(model(X_e), mu_train, tau).numpy()
-
         X_t = torch.tensor(train_data["X"])
-        pi_t = softmax_policy(model(X_t), mu_train, tau).numpy()
+
+        if policy == "softmax":
+            pi_e = softmax_policy(model(X_e), mu_train, tau).numpy()
+            pi_t = softmax_policy(model(X_t), mu_train, tau).numpy()
+        elif policy == "argmax":
+            M_e = model(X_e).numpy()
+            M_t = model(X_t).numpy()
+            a_e = (M_e - mu_np[None, :]).argmax(axis=1)
+            pi_e = np.zeros_like(M_e)
+            pi_e[np.arange(len(M_e)), a_e] = 1.0
+            a_t = (M_t - mu_np[None, :]).argmax(axis=1)
+            pi_t = np.zeros_like(M_t)
+            pi_t[np.arange(len(M_t)), a_t] = 1.0
+        else:
+            raise ValueError(f"Unknown policy: {policy}")
 
     V_ipw_train = ipw_value_np(
         pi_t, train_data["T"], train_data["Y"], train_data["e_T"]
@@ -37,7 +54,7 @@ def evaluate_GF_model(model, mu_train, train_data, eval_data, m_hat_eval,
     V_dr_eval = dr_value_np(
         pi_e, eval_data["T"], eval_data["Y"], eval_data["e_T"], m_hat_eval
     )
-    V_orc = oracle_value_soft(pi_e, eval_data["Y_pot"])
+    V_orc = oracle_value_onehot(pi_e, eval_data["Y_pot"])
     alloc = pi_e.mean(axis=0)
 
     return {
@@ -50,7 +67,7 @@ def evaluate_GF_model(model, mu_train, train_data, eval_data, m_hat_eval,
         "cap_viol_sup": float(np.maximum(alloc - b, 0.0).max()),
         "cap_ok": bool(np.all(alloc <= b + 1e-3)),
         "method": tag,
-        "mu": mu_train.detach().cpu().numpy(),
+        "mu": mu_np,
         "lp_status": "NA",
         "lp_time": np.nan,
         "total_time": np.nan,
