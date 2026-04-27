@@ -11,6 +11,7 @@ def generate_data(
     sigma_y=0.5,
     propensity_strength=0.7,
     outcome_strength=1.0,
+    treatment_effect_strength=1.0,
     clip_propensity=0.02,
 ):
     """
@@ -28,25 +29,58 @@ def generate_data(
     """
     rng = np.random.default_rng(seed)
 
-    X = rng.normal(size=(N, d))
+    # Non-negative covariates, X ~ Uniform[0, 1]^d.
+    X = rng.uniform(0.0, 1.0, size=(N, d))
 
+    # Hidden basis for treatment effects: phi(X) = X(1-X), elementwise.
+    # Under X ~ U[0,1], cov(phi_j(X), X_j) = 0, so OLS / Lasso of Y on X
+    # project the phi-component to zero slope -> linear methods can only
+    # estimate constant per-treatment offsets and cannot personalize.
+    # Tree, KNN, and MLP-based methods recover the nonlinear shape.
+    phi_X = X * (1.0 - X)
+
+    # Shared baseline direction in X-space (random, unit L2). Linear methods
+    # CAN fit this; the misspecification is isolated to the treatment-effect
+    # contrast, which is the part that drives policy decisions.
     beta_base = rng.normal(size=d)
     beta_base = beta_base / np.linalg.norm(beta_base)
 
-    beta_dev = rng.normal(size=(T, d))
-    beta_dev = beta_dev / np.linalg.norm(beta_dev, axis=1, keepdims=True)
+    # Treatment-effect vectors β_dev_t in phi-space: deterministic, sparse,
+    # non-negative, nested. Each treatment t > 0 activates two more entries
+    # than t-1, with magnitudes [1.0, 0.6] per pair. Combined with phi(X) ≥ 0
+    # (since X ∈ [0, 1]), this gives strict elementwise dominance on
+    # conditional means:
+    #     E[Y^t | X] >= E[Y^{t-1} | X]   for all t >= 1.
+    features_per_step = 2
+    unit_magnitudes = np.array([1.0, 0.6])
+    beta_dev = np.zeros((T, d))
+    for t in range(1, T):
+        beta_dev[t] = beta_dev[t - 1]
+        start = (t - 1) * features_per_step
+        end = min(start + features_per_step, d)
+        if start < d:
+            beta_dev[t, start:end] = unit_magnitudes[: end - start]
 
-    Beta = outcome_strength * (beta_base[None, :] + 0.5 * beta_dev)
-    Beta[0] = 0.5 * beta_base  # baseline / control
-
+    # Y^t(x) = OS · β_base · x + TE · β_dev_t · phi(x) + ε
+    # Y^0(x) = OS · β_base · x + ε                       (control)
+    linear_baseline = outcome_strength * (X @ beta_base)             # (N,)
+    nonlinear_effect = treatment_effect_strength * (phi_X @ beta_dev.T)  # (N, T)
     noise = sigma_y * rng.normal(size=(N, T))
-    Y_pot = X @ Beta.T + noise
+    Y_pot = linear_baseline[:, None] + nonlinear_effect + noise
+
+    # Diagnostic Beta: per-treatment coefficient on the *visible* X if linear
+    # methods were oracle-correct. Since the treatment effect lives in phi(X),
+    # this is just β_base (shared across t) for every treatment — i.e. linear
+    # methods see no per-treatment X-direction, only constant offsets.
+    Beta = (outcome_strength * beta_base[None, :]).repeat(T, axis=0)
 
     Alpha = rng.normal(size=(T, d))
     Alpha = Alpha / np.linalg.norm(Alpha, axis=1, keepdims=True)
     Alpha[0] = 0.0
 
-    S = propensity_strength * (X @ Alpha.T)
+    # Center X around its mean (0.5) for the propensity score so that no
+    # treatment is structurally over-/under-represented when X >= 0.
+    S = propensity_strength * ((X - 0.5) @ Alpha.T)
     S_shift = S - S.max(axis=1, keepdims=True)
     E = np.exp(S_shift)
     E = E / E.sum(axis=1, keepdims=True)

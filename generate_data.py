@@ -17,6 +17,7 @@ def main():
         sigma_y=config.SIGMA_Y,
         propensity_strength=config.PROPENSITY_STRENGTH,
         outcome_strength=config.OUTCOME_STRENGTH,
+        treatment_effect_strength=config.TREATMENT_EFFECT_STRENGTH,
         clip_propensity=config.CLIP_PROPENSITY,
     )
 
@@ -28,6 +29,7 @@ def main():
         sigma_y=config.SIGMA_Y,
         propensity_strength=config.PROPENSITY_STRENGTH,
         outcome_strength=config.OUTCOME_STRENGTH,
+        treatment_effect_strength=config.TREATMENT_EFFECT_STRENGTH,
         clip_propensity=config.CLIP_PROPENSITY,
     )
 
@@ -44,6 +46,7 @@ def main():
         SIGMA_Y=config.SIGMA_Y,
         PROPENSITY_STRENGTH=config.PROPENSITY_STRENGTH,
         OUTCOME_STRENGTH=config.OUTCOME_STRENGTH,
+        TREATMENT_EFFECT_STRENGTH=config.TREATMENT_EFFECT_STRENGTH,
         CLIP_PROPENSITY=config.CLIP_PROPENSITY,
         TRAIN_SEED=config.TRAIN_SEED,
         EVAL_SEED=config.EVAL_SEED,
